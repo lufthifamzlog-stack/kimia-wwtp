@@ -1,0 +1,98 @@
+# Setiap kali ada perubahan di branch main:
+#  1) membuat APK Android (diterbitkan di halaman Releases)
+#  2) menerbitkan website gratis di GitHub Pages (branch gh-pages), beserta link unduh APK
+name: Build APK & Website
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Buat ikon
+        run: |
+          pip install --quiet pillow
+          python3 tools/gen_icons.py
+
+      - name: Siapkan kunci tanda tangan APK
+        run: |
+          if [ -f android/app/wwtp-release.jks.b64 ]; then
+            base64 -d android/app/wwtp-release.jks.b64 > android/app/wwtp-release.jks
+          else
+            # Build pertama: buat kunci sekali, lalu simpan ke repo agar semua versi APK memakai kunci yang sama
+            keytool -genkeypair -keystore android/app/wwtp-release.jks -alias wwtp -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass kimiawwtp2026 -keypass kimiawwtp2026 -dname "CN=Kimia WWTP, O=WWTP, C=ID"
+            base64 -w 76 android/app/wwtp-release.jks > android/app/wwtp-release.jks.b64
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add android/app/wwtp-release.jks.b64
+            git commit -m "Simpan kunci tanda tangan APK [skip ci]"
+            git push
+          fi
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Build APK
+        run: gradle -p android assembleRelease --no-daemon
+
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk kimia-wwtp.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kimia-wwtp-apk
+          path: kimia-wwtp.apk
+
+      - name: Terbitkan di Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Kimia WWTP v1.0.${{ github.run_number }}
+          body: APK otomatis dari commit ${{ github.sha }}. Unduh file kimia-wwtp.apk lalu pasang di HP Android.
+          files: kimia-wwtp.apk
+          make_latest: true
+
+  website:
+    needs: apk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Siapkan isi website
+        run: |
+          pip install --quiet pillow
+          python3 tools/gen_icons.py
+          cp -r web _site
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: kimia-wwtp-apk
+          path: _site
+
+      - name: Terbitkan ke GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: _site
+          publish_branch: gh-pages
